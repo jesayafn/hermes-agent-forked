@@ -1,6 +1,7 @@
 """Canonical API admissions project the real turn: media, tool payloads, controls, outcomes."""
 import asyncio
 import base64
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -174,6 +175,9 @@ async def test_run_sse_tool_completed_reports_per_call_duration(api, owner, monk
     assert completed['call-a']['duration'] == 0.876
     assert completed['call-b']['duration'] == 0.25
     assert completed['call-missing']['duration'] == 0.0
+    # Duration and result projection must coexist on the same completion, even out of order.
+    assert json.loads(completed['call-a']['preview']) == {'output': 'a', 'exit_code': 0}
+    assert json.loads(completed['call-b']['preview']) == {'output': 'b', 'exit_code': 0}
 
 
 @pytest.mark.asyncio
