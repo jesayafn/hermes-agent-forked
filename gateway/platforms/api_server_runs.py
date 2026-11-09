@@ -1107,6 +1107,10 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run.admission is not None:
             from gateway.session_api_turn import observe_api_controls, observe_api_turn
             tool_cb = self._make_run_event_callback(run_id, loop)
+            # Calls may overlap and their callbacks may run on worker threads, so keep
+            # each start tied to its tool-call ID and protect the shared timing map.
+            tool_start_times: dict[str, float] = {}
+            tool_start_times_lock = threading.Lock()
 
             def _control_cb(event_type, prompt):
                 # Same authority prompt the WS viewer and GET pending_controls expose, on the
@@ -1116,13 +1120,21 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
 
             def _tool_start(call_id, name, args):
                 from agent.display import build_tool_preview
+                if call_id:
+                    with tool_start_times_lock:
+                        tool_start_times[str(call_id)] = time.monotonic()
                 tool_cb("tool.started", name, build_tool_preview(name, args or {}) or "", args, tool_call_id=call_id)
 
             def _tool_complete(call_id, name, args, result):
                 from agent.display import _detect_tool_failure
+                completed_at = time.monotonic()
+                with tool_start_times_lock:
+                    started_at = tool_start_times.pop(str(call_id or ""), None)
+                # Preserve the SSE event's existing zero default if no matching start arrived.
+                duration = completed_at - started_at if started_at is not None else 0.0
                 is_error, _ = _detect_tool_failure(name, result)
                 tool_cb("tool.completed", name, None, args, tool_call_id=call_id, is_error=bool(is_error),
-                        result=result)
+                        result=result, duration=duration)
 
             with observe_api_controls(run.admission, _control_cb):
                 result, usage = await observe_api_turn(

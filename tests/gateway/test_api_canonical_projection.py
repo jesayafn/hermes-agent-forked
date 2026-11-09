@@ -141,6 +141,42 @@ async def test_run_sse_tool_completed_carries_the_tool_result_preview(api, owner
 
 
 @pytest.mark.asyncio
+async def test_run_sse_tool_completed_reports_per_call_duration(api, owner, monkeypatch):
+    admitted = admit_api_turn(api, session_id='sse-duration', user_message='hello', conversation_history=[])
+    _, ref, _row = admitted
+    launch, queue = _launch(api, admitted)
+
+    from gateway.platforms import api_server_runs
+    real_time = api_server_runs.time
+    clock = iter([10.0, 10.125, 10.375, 10.8764, 10.9])
+    monkeypatch.setattr(api_server_runs, 'time', SimpleNamespace(
+        monotonic=lambda: next(clock), perf_counter=real_time.perf_counter, time=real_time.time))
+
+    async def handle(event):
+        from gateway.session_results import execution_result
+        turn = _turn_runner(owner, ref)
+        args = {'command': 'true'}
+        turn.combined_tool_start_callback('call-a', 'terminal', args)
+        turn.combined_tool_start_callback('call-b', 'terminal', args)
+        # Complete the newer call first to prove each result uses its own start timestamp.
+        turn.combined_tool_complete_callback('call-b', 'terminal', args, {'output': 'b', 'exit_code': 0})
+        turn.combined_tool_complete_callback('call-a', 'terminal', args, {'output': 'a', 'exit_code': 0})
+        # A completion with no observed start keeps the existing zero-duration behavior.
+        turn.combined_tool_complete_callback('call-missing', 'terminal', args, {'output': '', 'exit_code': 0})
+        execution_result.get()['result'] = {'final_response': 'done'}
+        return 'done'
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)  # call_soon_threadsafe projections land on the loop
+
+    completed = {event['tool_call_id']: event for event in _events(queue)
+                 if event['event'] == 'tool.completed'}
+    assert completed['call-a']['duration'] == 0.876
+    assert completed['call-b']['duration'] == 0.25
+    assert completed['call-missing']['duration'] == 0.0
+
+
+@pytest.mark.asyncio
 async def test_run_sse_tool_completed_preview_is_bounded(api, owner):
     """The public run stream keeps the preview bounded, whatever the tool returned."""
     admitted = admit_api_turn(api, session_id='sse-preview-long', user_message='hello', conversation_history=[])
